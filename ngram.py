@@ -2,6 +2,7 @@
 import torch
 import numpy as np
 import sys
+import random
 #datasets
 from torch.utils.data import Dataset
 from torchvision import datasets, transforms
@@ -78,7 +79,11 @@ class NGramModel(nn.Module):
             #relu mean rectified linear unit
             # it just takes all the negative numbers and makes them 0
             nn.ReLU(),
-            
+
+            ##second hidden layer
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+
             #output hidden_dim->vocab size: this is because we assign each word a number for output
             nn.Linear(hidden_dim, vocab_size)
         )
@@ -242,13 +247,6 @@ def _test_(model, test_loader, device, max_examples=1000, print_examples=10):
 
 
 
-
-
-
-
-
-
-
 def test(embedding_dim, context_amount, hidden_dim, vocab_size):
     device = torch.accelerator.current_accelerator().type if torch.accelerator.is_available() else "cpu"
     model = NGramModel(vocab_size, embedding_dim, context_amount, hidden_dim).to(device)
@@ -264,6 +262,52 @@ def test(embedding_dim, context_amount, hidden_dim, vocab_size):
     )
 
     _test_(model, test_loader, device, max_examples=1000, print_examples=10)
+
+
+# this method will generate a response based off the context amount. 
+#so we will only grab one input from the data loader and then build on it till
+# our token = <eos>
+def _generate_(model, device, context_amount, max_tokens=30):
+    model.eval()
+    xs, ys = make_ngrams(test_data, context_amount)
+    random_num = random.randrange(len(xs))
+    context = xs[random_num].tolist()
+    generated = context.copy()
+
+    print("starting context:", " ".join(TEXT.vocab.itos[i] for i in context))
+
+    with torch.no_grad():
+        for _ in range(max_tokens):
+            x = torch.tensor([context]).to(device)
+            logits = model(x)
+
+            unk_id = TEXT.vocab.stoi["<unk>"]
+            logits[0, unk_id] = -float("inf")
+            pred_id = logits.argmax(dim=1).item()
+
+
+            pred_id = logits.argmax(dim=1).item()
+            pred_word = TEXT.vocab.itos[pred_id]
+
+            generated.append(pred_id)
+            print(pred_word)
+
+            if pred_word == "<eos>":
+                break
+
+            # Remove the oldest token and add the predicted token to the end.
+            context = context[1:] + [pred_id]
+
+    print("generated:", " ".join(TEXT.vocab.itos[i] for i in generated))
+
+
+def generate(embedding_dim, context_amount, hidden_dim, vocab_size):
+    device = torch.accelerator.current_accelerator().type if torch.accelerator.is_available() else "cpu"
+    model = NGramModel(vocab_size, embedding_dim, context_amount, hidden_dim).to(device)
+    model.load_state_dict(torch.load("n_gram_model.pth", map_location=device))
+
+    _generate_(model, device, context_amount)
+
 
 
 
@@ -290,6 +334,9 @@ def main():
     elif flag == "test":
         print("Testing starting now...")
         test(embedding_dim, context_amount, hidden_dim, vocab_size)
+    elif flag == "generate":
+        print("Generating starting now...")
+        generate(embedding_dim, context_amount, hidden_dim, vocab_size)
     else:
         print("Improper request. Requires flag")
 
