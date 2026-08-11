@@ -144,7 +144,7 @@ def train(embedding_dim, hidden_dim, vocab_size, cont, epochs):
     
 
     _train_(model, optimizer, train_data, device, epochs)
-    torch.save(model.state_dict(), "rnn_model.pth")
+    torch.save(model.state_dict(), "rnn_model_epoch_20.pth")
 
 ################################################################################
 # 4. Now we must write the testing functions
@@ -152,39 +152,51 @@ def train(embedding_dim, hidden_dim, vocab_size, cont, epochs):
 # Then we will move onto an generation 
 ################################################################################
 
-def _next_word_pred_(model, test_data, device, batch_size):
+def _next_word_pred_(model, test_data, device, batch_size, seq_len=35, max_examples=1000, print_examples=10):
     data = batchify(test_data, batch_size, device)
+    model.eval()
     h = torch.zeros(batch_size, model.hidden_dim, device=device)
     stream_len = data.size(1)
     correct = 0
-    wrong = 0
-    #this loops through the entire steam
-    with torch.no_grad():
-        for start in range(0, stream_len-1, 4)
-            h = torch.zeros(batch_size, model.hidden_dim, device=device)
-            for i in range(batch_size-1):
-                x = data[start+i]
-                y = data[start+i+1]
-                x = x.to(device)
-                y = y.to(device)
-                logits, h = model(x, h)
-            pred = logits.argmax[1]
-            val = 0
-            for index in pred:
-                if index == 1:
-                    # i know this part is wrong help me with comparing the outputs
-                    real_word = TEXT.vocab.itos[real_id.item()]
-                    pred_word = TEXT.vocab.itos[pred_id.item()]
-                    if real_word == pred_word:
-                        print("correct")
-                    else:
-                        print("fail")
-                
-        
-        val += 1
-        
+    total = 0
+    shown = 0
 
-    
+    # This loops through the stream in chunks that match training.
+    with torch.no_grad():
+        for start in range(0, stream_len - 1, seq_len):
+            length = min(seq_len, stream_len - 1 - start)
+
+            for t in range(length):
+                x = data[:, start + t]
+                y = data[:, start + t + 1]
+                logits, h = model(x, h)
+                preds = logits.argmax(dim=1)
+
+                correct += (preds == y).sum().item()
+                total += y.numel()
+
+                if shown < print_examples:
+                    for input_id, real_id, pred_id in zip(x.cpu(), y.cpu(), preds.cpu()):
+                        if shown >= print_examples:
+                            break
+
+                        input_word = TEXT.vocab.itos[input_id.item()]
+                        real_word = TEXT.vocab.itos[real_id.item()]
+                        pred_word = TEXT.vocab.itos[pred_id.item()]
+                        print("input:    ", input_word)
+                        print("real:     ", real_word)
+                        print("predicted:", pred_word)
+                        print()
+                        shown += 1
+
+                if total >= max_examples:
+                    break
+
+            if total >= max_examples:
+                break
+
+    percent_correct = correct / total * 100
+    print(f"Correct: {correct}/{total} ({percent_correct:.2f}%)")
 
 
 def test(embedding_dim, hidden_dim, vocab_size):
@@ -194,7 +206,7 @@ def test(embedding_dim, hidden_dim, vocab_size):
  
     model.load_state_dict(torch.load("rnn_model.pth", map_location=device))
 
-    _next_word_pred_(model, test_data, device, 4)
+    _next_word_pred_(model, test_data, device, 32)
 
     
 
@@ -204,10 +216,10 @@ def main():
     flag = sys.argv[1]
 
     #env vars
-    embedding_dim = 8
-    hidden_dim = 128
+    embedding_dim = 32
+    hidden_dim = 256
     vocab_size = len(TEXT.vocab)
-    epochs = 10
+    epochs = 20
     
     #execution
     if flag == "train":
