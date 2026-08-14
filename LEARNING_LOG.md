@@ -120,3 +120,43 @@ Feed-forward neural nets -> RNNs -> LSTM -> seq2seq -> attention -> Transformer
   - backpropagate once per chunk
 - Added gradient clipping with `clip_grad_norm_` to reduce unstable RNN updates.
 - Added per-token epoch loss reporting and checkpoint saving/loading with `rnn_model.pth`.
+
+## 2026-08-12
+
+- Continued the bigger Elman RNN experiment with `embedding_dim = 56` and `hidden_dim = 512`.
+- Trained the bigger model from epoch 20 to epoch 40 with `python3 rnn.py continue`.
+- Recorded the continued-training loss curve:
+  - epoch 20 continuation started around `3.3804`
+  - final continued-training loss reached `2.955093368711435`
+- Tested the continued bigger model and saw held-out exact next-token accuracy drop to `172/1024 (16.80%)`.
+- Compared this against the bigger model's epoch-20 test result of `183/1024 (17.87%)` and the smaller RNN baseline of `187/1024 (18.26%)`.
+- Noted the important experiment result: training loss kept improving while held-out accuracy got worse, suggesting overfitting or weaker generalization.
+- Generated qualitative samples from the epoch-40 bigger model.
+- Observed that some generated text still had plausible business/news phrases, but also more odd phrase collisions such as `french mushrooms hotel`, `proxy navy`, and `journal flush`.
+- Saved the bigger-model experiment trail in `outputs/rnn_bigger_model_epoch_20.md`.
+
+## 2026-08-13
+
+- Studied LSTM architecture after reading the friendlier Google/Olah explanation and comparing it with the original research-paper notation.
+- Interpreted the original LSTM memory-cell diagram:
+  - the self-loop with weight `1.0` represents carrying cell state forward across time
+  - the input gate controls whether new candidate memory is written
+  - the output gate controls whether memory is exposed to the rest of the network
+  - the original diagram does not show the modern forget gate
+- Clarified that the circular arrow is symbolic for recurrence across time, not a literal instantaneous loop inside one timestep.
+- Discussed why gate matrices learn their roles without direct supervision:
+  - architecture gives each gate a specific kind of control
+  - the loss punishes bad predictions
+  - gradients shape each gate based on whether keeping, writing, forgetting, or exposing information helped prediction
+- Clarified the difference between concatenating input embeddings with the previous hidden state and adding vectors:
+  - concatenation places vectors side by side
+  - a later linear layer learns how to mix the combined vector
+  - this is mathematically similar to separate input and hidden projections whose results are added
+- Started a manual LSTM implementation in `lstm.py`.
+- Reviewed the first LSTM draft and found the main issue: gates should be computed in parallel from the current embedding plus previous hidden state, then combined with the LSTM equations, rather than built as sequential modules.
+- Identified concrete fixes for `lstm.py`:
+  - add the missing `=` in the `add_to_cell_gate` definition
+  - avoid defining `i_t` and `C_t` inside `nn.Sequential`
+  - use `nn.Linear(...)` layers in `__init__` and apply `sigmoid`/`tanh` in `forward`
+  - pass both hidden state `h` and cell state `c` through `forward`
+  - use `hidden_dim` for both `h` and `c` at first to keep the implementation simple

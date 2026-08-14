@@ -138,13 +138,13 @@ def train(embedding_dim, hidden_dim, vocab_size, cont, epochs):
     model = RNN(vocab_size, embedding_dim, hidden_dim).to(device)
  
     if cont:
-        model.load_state_dict(torch.load("rnn_model.pth", map_location=device))
+        model.load_state_dict(torch.load("rnn_model_bigger_epoch_20.pth", map_location=device))
 
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
     
 
     _train_(model, optimizer, train_data, device, epochs)
-    torch.save(model.state_dict(), "rnn_model_epoch_20.pth")
+    torch.save(model.state_dict(), "rnn_model_bigger_epoch_40.pth")
 
 ################################################################################
 # 4. Now we must write the testing functions
@@ -204,10 +204,58 @@ def test(embedding_dim, hidden_dim, vocab_size):
     
     model = RNN(vocab_size, embedding_dim, hidden_dim).to(device)
  
-    model.load_state_dict(torch.load("rnn_model.pth", map_location=device))
+    model.load_state_dict(torch.load("rnn_model_bigger_epoch_40.pth", map_location=device))
 
     _next_word_pred_(model, test_data, device, 32)
 
+
+def _generate_(model, test_data, device, batch_size):
+    """
+    So I think I want to load the context in with a few words before I start
+    the generation. This is going to help the model start on track.
+    """
+    data = batchify(test_data, batch_size, device)
+    model.eval()
+    stream_len = data.size(1)
+    # generate three different sequences every time
+    with torch.no_grad():
+        for i in range(10):
+            print(f"Sequence Starting...")
+            h = torch.zeros(1, model.hidden_dim, device=device)
+            # first step is to get the random number for the row we are using
+            r = random.randrange(batch_size)
+            start = random.randrange(stream_len - 13)
+            # then we have to load in the context for the first 2 words and pass the 3rd word
+            for j in range(3):
+                x = data[r, j + start]
+                print(f"{TEXT.vocab.itos[x.item()]}" , end=" ")
+                logits, h = model(x.view(1), h)
+    
+            pred = logits.argmax(dim=1)
+            pred_word = TEXT.vocab.itos[pred.item()]
+            for word in range(10):
+                print(f"{pred_word}", end=" ")
+                logits, h = model(pred, h)
+
+                unk_id = TEXT.vocab.stoi["<unk>"]
+                logits[0, unk_id] = -float("inf")
+
+
+                pred = logits.argmax(dim=1)
+                pred_word = TEXT.vocab.itos[pred.item()]
+            print(f"\nSequence Over \n Generating Next Sequence")
+
+
+
+
+def generate(embedding_dim, hidden_dim, vocab_size):
+    device = torch.accelerator.current_accelerator().type if torch.accelerator.is_available() else "cpu"
+    
+    model = RNN(vocab_size, embedding_dim, hidden_dim).to(device)
+ 
+    model.load_state_dict(torch.load("rnn_model_bigger_epoch_40.pth", map_location=device))
+
+    _generate_(model, test_data, device, 1000)
     
 
 
@@ -216,8 +264,8 @@ def main():
     flag = sys.argv[1]
 
     #env vars
-    embedding_dim = 32
-    hidden_dim = 256
+    embedding_dim = 56
+    hidden_dim = 512
     vocab_size = len(TEXT.vocab)
     epochs = 20
     
