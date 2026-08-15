@@ -46,7 +46,8 @@ class LSTM(nn.Module):
         self.embeddings = nn.Embedding(vocab_size, embedding_dim)
         self.flatten = nn.Flatten()
         self.hidden_dim = hidden_dim
-      
+        self.epochs = 0
+
         combined_dim = hidden_dim+embedding_dim
         ### GATES
         self.forget_gate = nn.Linear(combined_dim, hidden_dim)
@@ -195,10 +196,11 @@ def __train__(model, device, train_dataset, valid_dataset, optimizer, epochs, se
             print(f"Overfitting detected... New loss: {valid_loss} Old loss: {best_valid}")
         else:
             best_valid = valid_loss
+            torch.save(model.state_dict(), "lstm_model.pth")
         model.train()
-        
+
+        model.epochs += 1
         print(f"epoch {e + 1}: train {epoch_loss / token_count:.4f}, valid {valid_loss:.4f}, ppl {valid_ppl:.2f}")
-    torch.save(model.state_dict(), "lstm_model.pth")
 
 
 def train(vocab_size, embedding_dim, hidden_dim, cont, epoch, seq_len, batch_size):
@@ -207,7 +209,6 @@ def train(vocab_size, embedding_dim, hidden_dim, cont, epoch, seq_len, batch_siz
 
     if cont:
         model.load_state_dict(torch.load("lstm_model.pth", map_location=device))
-
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
     
     __train__(model, device, train_data, valid_data, optimizer, epoch, seq_len, batch_size)
@@ -281,7 +282,7 @@ def main():
     context_amount = 5
     hidden_dim = 512
     vocab_size = len(TEXT.vocab)
-    epochs = 5
+    epochs = 15
 
     seq_len = 64
     batch_size = 64
