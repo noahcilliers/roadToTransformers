@@ -160,3 +160,29 @@ Feed-forward neural nets -> RNNs -> LSTM -> seq2seq -> attention -> Transformer
   - use `nn.Linear(...)` layers in `__init__` and apply `sigmoid`/`tanh` in `forward`
   - pass both hidden state `h` and cell state `c` through `forward`
   - use `hidden_dim` for both `h` and `c` at first to keep the implementation simple
+
+## 2026-08-14
+
+- Clarified the difference between `sigmoid` and `tanh` in LSTMs:
+  - `sigmoid` squashes values to `0..1`, so it works naturally as a gate or knob
+  - `tanh` squashes values to `-1..1`, so it works naturally as signed candidate content
+  - LSTM gates use sigmoid for forget/input/output decisions, while the candidate memory uses tanh
+- Reviewed the updated manual LSTM cell in `lstm.py`.
+- Confirmed that the core LSTM equations are now in the right shape:
+  - concatenate current embedding and previous hidden state
+  - compute forget, input, candidate, and output gates in parallel
+  - update cell state with `c = f * c + i * candidate`
+  - update hidden state with `h = o * tanh(c)`
+- Found the remaining LSTM implementation work is mostly in training/validation wiring rather than the cell math.
+- Reviewed the validation implementation and identified key fixes:
+  - define `stream_len = data.size(1)` inside `__valid__`
+  - return average validation loss with `epoch_loss / token_count`
+  - detach both `h` and `c` during truncated backpropagation/validation
+  - call `__train__` with the required train dataset, validation dataset, optimizer, epoch count, sequence length, and batch size
+  - track best validation loss with `float("inf")` or `None` rather than a sentinel like `-1000`
+- Discussed why exact next-token accuracy is a limited language-model metric.
+- Introduced validation loss and perplexity as better language-model evaluation tools.
+- Clarified that PyTorch `CrossEntropyLoss` computes `-ln(p_correct)`, not `-log2(p_correct)`.
+- Clarified that `p_correct` is the probability assigned to the true next token, not necessarily the probability of the token the model guessed with `argmax`.
+- Defined perplexity as `exp(validation_loss)` when using PyTorch's natural-log cross entropy.
+- Interpreted perplexity as a rough measure of how many plausible next-token choices the model is still uncertain among.

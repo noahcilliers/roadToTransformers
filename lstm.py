@@ -155,7 +155,7 @@ def __valid__(model, device, valid_dataset, seq_len, batch_size):
 
 
 
-def __train__(model, device, train_dataset, valid_dataset, optimizer, epoch, seq_len, batch_size):
+def __train__(model, device, train_dataset, valid_dataset, optimizer, epochs, seq_len, batch_size):
     data= batchify(train_dataset, batch_size, device)
     stream_len = data.size(1)
 
@@ -192,12 +192,13 @@ def __train__(model, device, train_dataset, valid_dataset, optimizer, epoch, seq
         
         valid_loss, valid_ppl = __valid__(model, device, valid_dataset, seq_len, batch_size)
         if valid_loss > best_valid:
-            print(f"Overfitting detected... New loss: {new_valid} Old loss: {valid}")
+            print(f"Overfitting detected... New loss: {valid_loss} Old loss: {best_valid}")
         else:
             best_valid = valid_loss
+        model.train()
         
         print(f"epoch {e + 1}: train {epoch_loss / token_count:.4f}, valid {valid_loss:.4f}, ppl {valid_ppl:.2f}")
-
+    torch.save(model.state_dict(), "lstm_model.pth")
 
 
 def train(vocab_size, embedding_dim, hidden_dim, cont, epoch, seq_len, batch_size):
@@ -211,21 +212,91 @@ def train(vocab_size, embedding_dim, hidden_dim, cont, epoch, seq_len, batch_siz
     
     __train__(model, device, train_data, valid_data, optimizer, epoch, seq_len, batch_size)
 
+############################################################
+### Testing functions below                             ###
+############################################################
+
+def __test__(model, device, test_dataset, seq_len, batch_size):
+    # do testing next token prediction for now
+    data = batchify(test_dataset, batch_size, device)
+    stream_len = data.size(1)
+
+    model.eval()
+
+    correct = 0
+    total = 0
+
+    h = torch.zeros(batch_size, model.hidden_dim, device=device)
+    c = torch.zeros(batch_size, model.hidden_dim, device=device)
+
+    with torch.no_grad():
+        for start in range(0, stream_len - 1, seq_len):
+                length = min(seq_len, stream_len - 1 - start)   # last chunk is short
+                x_chunk = data[:, start : start + length]           # [B, length]
+                y_chunk = data[:, start + 1 : start + 1 + length]   # [B, length]
+
+                h = h.detach()          # carry the context, cut the gradient
+                c = c.detach()
+
+                for t in range(length):
+                    logits, h, c = model(x_chunk[:, t], h, c)             # logits [B, vocab]
+                # now we need to check our logits against the predicted value
+                # select the single argmaxxed value
+                    predictions = logits.argmax(dim=1)
+                # check all of them
+                    correct += (predictions == y_chunk[:, t]).sum().item()
+                    total += batch_size
+        print(f"Testing results: {correct} correct and {total-correct} wrong...  {(correct / total) * 100:.2f} %")
+                
+
+                
+
+    
+
+
+def test(vocab_size, embedding_dim, hidden_dim, batch_size, seq_len):
+    # set up the testing model and such
+    device = torch.accelerator.current_accelerator().type if torch.accelerator.is_available() else "cpu"
+    model = LSTM(vocab_size, embedding_dim, hidden_dim).to(device)
+
+    model.load_state_dict(torch.load("lstm_model.pth", map_location=device))
+
+    __test__(model, device, test_data, seq_len, batch_size)
+
+
+
 
 
 parser = argparse.ArgumentParser()
 
 def main():
     parser.add_argument("--fn", type=str, default="empty")
-    parser.add_argument("--cont", type=bool, default=False)
+    parser.add_argument("--cont", action="store_true")
 
     args = parser.parse_args()
+
+    
+    
+    embedding_dim = 64
+    context_amount = 5
+    hidden_dim = 512
+    vocab_size = len(TEXT.vocab)
+    epochs = 5
+
+    seq_len = 64
+    batch_size = 64
+
 
     if args.fn == "empty":
         print("You must specify argument --fn. train, test, or generate")
 
-    if args.fn == "train":
+    elif args.fn == "train":
         print("LSTM training starting now")
+        train(vocab_size, embedding_dim, hidden_dim, args.cont, epochs, seq_len, batch_size)
+
+    elif args.fn == "test":
+        print("LSTM testing starting now")
+        test(vocab_size, embedding_dim, hidden_dim, batch_size, seq_len)
 
 
 
