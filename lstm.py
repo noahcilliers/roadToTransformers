@@ -58,6 +58,10 @@ class LSTM(nn.Module):
         ###Get Logits
         self.hidden_to_output = nn.Linear(hidden_dim, vocab_size)
 
+        # applied to the non-recurrent connections only: embedding -> cell,
+        # and cell -> logits. never to the h we hand to the next timestep.
+        self.dropout = nn.Dropout(0.5)
+
         
     def forward(self, x, h, c):
         """
@@ -68,7 +72,7 @@ class LSTM(nn.Module):
         """
 
 
-        embeds = self.embeddings(x)
+        embeds = self.dropout(self.embeddings(x))
         combined = torch.cat([embeds, h], dim=1)
         # Gate functions below
         # These operations get all the values from our gates
@@ -82,7 +86,7 @@ class LSTM(nn.Module):
         h = o * torch.tanh(c)
 
         # logits size of vocab of c
-        logits = self.hidden_to_output(h)
+        logits = self.hidden_to_output(self.dropout(h))
 
         return logits, h, c
 
@@ -116,6 +120,9 @@ def batchify(dataset, batch_size, device):
 ### Training functions below                             ###
 ############################################################
 loss_fn = nn.CrossEntropyLoss()
+
+# one place, so train/test/generate can never drift onto different checkpoints
+CHECKPOINT = "lstm_model_28M.pth"
 
 def __valid__(model, device, valid_dataset, seq_len, batch_size):
     data= batchify(valid_dataset, batch_size, device)
@@ -196,7 +203,7 @@ def __train__(model, device, train_dataset, valid_dataset, optimizer, epochs, se
             print(f"Overfitting detected... New loss: {valid_loss} Old loss: {best_valid}")
         else:
             best_valid = valid_loss
-            torch.save(model.state_dict(), "lstm_model.pth")
+            torch.save(model.state_dict(), CHECKPOINT)
         model.train()
 
         model.epochs += 1
@@ -208,7 +215,7 @@ def train(vocab_size, embedding_dim, hidden_dim, cont, epoch, seq_len, batch_siz
     model = LSTM(vocab_size, embedding_dim, hidden_dim).to(device)
 
     if cont:
-        model.load_state_dict(torch.load("lstm_model.pth", map_location=device))
+        model.load_state_dict(torch.load(CHECKPOINT, map_location=device))
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
     
     __train__(model, device, train_data, valid_data, optimizer, epoch, seq_len, batch_size)
@@ -260,9 +267,91 @@ def test(vocab_size, embedding_dim, hidden_dim, batch_size, seq_len):
     device = torch.accelerator.current_accelerator().type if torch.accelerator.is_available() else "cpu"
     model = LSTM(vocab_size, embedding_dim, hidden_dim).to(device)
 
-    model.load_state_dict(torch.load("lstm_model.pth", map_location=device))
+    model.load_state_dict(torch.load(CHECKPOINT, map_location=device))
 
     __test__(model, device, test_data, seq_len, batch_size)
+
+
+############################################################
+### Generation functions below                           ###
+############################################################
+
+def sample(logits, temperature, top_k):
+    """
+    Pick the next token by sampling instead of argmax.
+
+    argmax always takes the single most likely token, which walks the model
+    straight into its highest-frequency loop ("the <unk> of the <unk> ...").
+    Sampling from the distribution keeps the output varied.
+
+    temperature < 1 sharpens the distribution (more conservative),
+    temperature > 1 flattens it (more random).
+    top_k discards everything outside the k most likely tokens so we never
+    sample from the long tail of near-zero-probability junk.
+    """
+    logits = logits / temperature
+
+    if top_k:
+        # the k-th best score per row, everything below it becomes impossible
+        kth = logits.topk(top_k, dim=1).values[:, -1:]      # [B, 1]
+        logits = logits.masked_fill(logits < kth, float("-inf"))
+
+    probs = F.softmax(logits, dim=1)
+    return torch.multinomial(probs, num_samples=1).squeeze(1)
+
+
+def __generate__(model, dataset, device, batch_size, seq_len, context, temperature, top_k):
+    data = batchify(dataset, batch_size, device)
+    stream_len = data.size(1)
+    model.eval()
+
+    h = torch.zeros(batch_size, model.hidden_dim, device=device)
+    c = torch.zeros(batch_size, model.hidden_dim, device=device)
+
+    context_tokens = [[] for _ in range(batch_size)]
+    generated_tokens = [[] for _ in range(batch_size)]
+    
+    with torch.no_grad():
+        start = random.randrange(stream_len - seq_len)
+        x_chunk = data[:, start : start + context]
+
+        for t in range(context):
+            logits, h, c = model(x_chunk[:, t], h, c)
+            for row in range(batch_size):
+                context_tokens[row].append(x_chunk[row, t].item())
+
+        predictions = sample(logits, temperature, top_k)
+
+        for _ in range(seq_len - context):
+            for row in range(batch_size):
+                generated_tokens[row].append(predictions[row].item())
+            logits, h, c = model(predictions, h, c)
+            predictions = sample(logits, temperature, top_k)
+
+    #printing function
+    for row in range(batch_size):
+        context_words = [TEXT.vocab.itos[token_id] for token_id in context_tokens[row]]
+        generated_words = [TEXT.vocab.itos[token_id] for token_id in generated_tokens[row]]
+        print(f"\nSequence {row + 1:02d}")
+        print(f"context:  {' '.join(context_words)}")
+        print(f"generated: {' '.join(generated_words)}")
+
+
+        
+def generate(vocab_size, embedding_dim, hidden_dim, batch_size, temperature, top_k):
+    device = torch.accelerator.current_accelerator().type if torch.accelerator.is_available() else "cpu"
+    model = LSTM(vocab_size, embedding_dim, hidden_dim).to(device)
+
+    model.load_state_dict(torch.load(CHECKPOINT, map_location=device))
+
+    batch_size = 10
+    seq_len = 40
+    context = 20
+
+    __generate__(model, test_data, device, batch_size, seq_len, context, temperature, top_k)
+
+
+
 
 
 
@@ -273,19 +362,20 @@ parser = argparse.ArgumentParser()
 def main():
     parser.add_argument("--fn", type=str, default="empty")
     parser.add_argument("--cont", action="store_true")
+    parser.add_argument("--temperature", type=float, default=0.8)
+    parser.add_argument("--top-k", type=int, default=40)
 
     args = parser.parse_args()
 
     
     
-    embedding_dim = 64
-    context_amount = 5
-    hidden_dim = 512
+    embedding_dim = 1024
+    hidden_dim = 1024
     vocab_size = len(TEXT.vocab)
-    epochs = 15
+    epochs = 40
 
     seq_len = 64
-    batch_size = 64
+    batch_size = 32
 
 
     if args.fn == "empty":
@@ -298,6 +388,10 @@ def main():
     elif args.fn == "test":
         print("LSTM testing starting now")
         test(vocab_size, embedding_dim, hidden_dim, batch_size, seq_len)
+    elif args.fn == "generate":
+        print("LSTM generating starting now")
+        generate(vocab_size, embedding_dim, hidden_dim, batch_size, args.temperature, args.top_k)
+        
 
 
 
