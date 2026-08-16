@@ -186,3 +186,117 @@ Feed-forward neural nets -> RNNs -> LSTM -> seq2seq -> attention -> Transformer
 - Clarified that `p_correct` is the probability assigned to the true next token, not necessarily the probability of the token the model guessed with `argmax`.
 - Defined perplexity as `exp(validation_loss)` when using PyTorch's natural-log cross entropy.
 - Interpreted perplexity as a rough measure of how many plausible next-token choices the model is still uncertain among.
+- Added and reviewed LSTM test-mode wiring in `lstm.py`:
+  - batchify the test dataset instead of accidentally using training data
+  - initialize both hidden state `h` and cell state `c`
+  - wrap evaluation in `torch.no_grad()`
+  - compare `argmax` next-token predictions against the shifted target tokens
+- Switched `--cont` to a normal command-line flag with `action="store_true"`.
+- Added checkpoint saving when validation loss improves, so interrupted continuation runs can still keep the best validation model reached so far.
+- Ran the first manual LSTM training pass:
+  - epoch 1 train/valid loss: `6.4194 / 5.9750`
+  - epoch 5 train/valid loss: `5.0613 / 5.2389`
+  - perplexity improved from `393.45` to `188.47`
+  - test accuracy reached `16390/82304 (19.91%)`
+- Continued LSTM training from the checkpoint with `python3 lstm.py --fn train --cont`.
+- Observed validation improvement through continued epoch 6:
+  - train loss `4.3853`
+  - validation loss `5.0633`
+  - perplexity `158.11`
+- Observed validation plateau/early overfitting warnings after continued epoch 6 while training loss kept decreasing.
+- Tested the best continued checkpoint and reached `18411/82304 (22.37%)` exact next-token accuracy.
+- Saved the experiment record in `LSTM_RESULTS.md`.
+
+## 2026-08-16
+
+### Diagnosing the `<unk>`-heavy generation output
+
+- Investigated why LSTM generation produced long runs of `<unk>` such as `the <unk> of the <unk> <unk> <unk>`.
+- Counted the raw corpus and found this is not a vocabulary bug:
+  - `ptb.train.txt` contains 887,521 tokens and 9,999 distinct types
+  - `<unk>` is the second most frequent token: 45,020 occurrences, 5.07% of the corpus
+  - only `the` is more common at 5.72%
+- Learned that the Mikolov-preprocessed PennTreebank ships *already* unked — rare words were replaced with the literal string `<unk>` before distribution, so the original words cannot be recovered by building a larger vocab.
+- Concluded the model predicting `<unk>` frequently is correct behavior for this corpus.
+- Identified the actual bug as greedy `argmax` decoding, which always takes the single most probable token and therefore falls into high-frequency loops.
+
+### Sampling, temperature, and top-k
+
+- Added a `sample()` function to `lstm.py` and replaced both `argmax` calls in `__generate__`.
+- Added `--temperature` and `--top-k` command line flags (defaults `0.8` and `40`).
+- Kept `argmax` in `__test__`, since accuracy should measure the model's single best guess.
+- Learned that temperature is not part of the softmax function; it is a rescaling of the logits applied before it, and comes from the Boltzmann distribution in statistical physics.
+- Learned that softmax is shift-invariant but not scale-invariant, so only the *gaps* between logits matter:
+  - adding 100 to every logit leaves the probabilities bit-for-bit identical
+  - dividing by `T` uniformly stretches or compresses every gap
+- Derived why the division goes inside the exponent: `exp(z/T) = exp(z)^(1/T)`, so temperature scaling in logit space equals raising probabilities to the power `1/T` and renormalizing.
+- Noted the limits: `T -> 0` is argmax (greedy), `T = 1` is the model's honest distribution, `T -> inf` is uniform.
+- Understood that scaling before the softmax rather than after is chosen for numerical stability (log-space avoids underflow of ~1e-8 probabilities) and because `-inf` top-k masking only means "impossible" in logit space.
+- Clarified that `T = 0.8` *sharpens* the distribution, so temperature was not what fixed the loop — replacing `argmax` with `torch.multinomial` was.
+- Confirmed generation improved substantially at `--temperature 1.1 --top-k 40`.
+
+### How cross entropy consumes logits
+
+- Confirmed `nn.CrossEntropyLoss` applies the softmax internally; it is `log_softmax` + `nll_loss` fused, so raw logits must be passed in.
+- Learned the fusion exists for numerical stability via the log-sum-exp trick.
+- Verified that the gradient of cross entropy with respect to the logits is exactly `p - y`, the predicted distribution minus the one-hot target.
+- Understood that a single token's loss therefore touches all 10,001 output logits: the correct one is pushed up by `1 - p`, and every other is pushed down in proportion to the probability it wrongly claimed.
+- Realized this is why top-k masking must never be used during training — `-inf` logits receive zero gradient and `-log(0)` produces `inf` loss.
+- Noted that probabilities are a generation-time concept in this code; training never leaves log space.
+
+### Dropout
+
+- Read that dropout randomly zeroes a fraction `p` of activations during training and scales survivors by `1/(1-p)`.
+- Learned the two standard explanations: preventing co-adaptation between units, and approximating an ensemble of exponentially many thinned subnetworks.
+- Understood why the `1/(1-p)` scaling matters: it matches `E[dropout(x)] = x`, so downstream layers see the same input magnitude at train and eval time.
+- Worked out the consequences of getting it wrong in this model specifically:
+  - the sigmoid/tanh gates would saturate, jamming the forget and input gates open
+  - logits would be uniformly 2x too large, which is *identical* to running permanently at temperature 0.5
+- Noted that the scaling deliberately fixes only the first moment — dropout still injects variance, and that variance is the entire regularizing mechanism.
+- Learned this is "inverted dropout"; the original formulation scaled weights by `(1-p)` at test time instead, and the inverted version won because inference needs no dropout-aware code.
+- Confirmed `nn.Dropout` reads its own `self.training` flag on every forward pass and becomes an identity function in eval mode.
+- Learned `model.train()` / `model.eval()` set that boolean recursively on all submodules, and that `eval()` is literally `train(False)`.
+- Noted `torch.no_grad()` and `model.eval()` are unrelated: one disables the autograd graph, the other changes layer behavior.
+- Noted the trap that `F.dropout` defaults to `training=True`, so the functional form silently stays on during eval unless `training=self.training` is passed.
+
+### Where dropout goes in a recurrent network
+
+- Read Zaremba, Sutskever & Vinyals (2014), "Recurrent Neural Network Regularization" (arXiv:1409.2329).
+- Learned the paper's notation: subscripts are timesteps, superscripts are layers.
+  - `h^(l-1)_t` is the **input** from the layer below (superscript changed = depth)
+  - `h^l_(t-1)` is the **previous hidden state** (subscript changed = time)
+- Realized the paper's two separate affine transforms `T_n,n` are equivalent to this code's single `Linear` applied to `torch.cat([embeds, h])`, since `[W_x | W_h] · [x ; h] = W_x·x + W_h·h`.
+- Learned the rule: dropout goes on superscript transitions (across layers), never on subscript transitions (across time).
+- Simulated why fresh per-timestep masks destroy memory: survival probability is `(1-p)^T`, so at `p=0.5` and `T=64` it is `5.4e-20` — zero of 10,000 units retained information.
+- Understood this attacks precisely the near-identity `c = c*f + ...` path that the LSTM exists to provide.
+- Contrasted with additive noise in a feedback loop, which is a random walk: std grows as `sqrt(T)`, roughly 8x over 64 timesteps.
+- Learned that a *fixed* mask reused across the whole sequence preserves 50% of units perfectly, because perfectly correlated noise does not accumulate — this is Gal & Ghahramani (2015), arXiv:1512.05287, which reports 73.4 test perplexity on PTB.
+- Applied dropout to `embeds` and to `h` before `hidden_to_output`, deliberately leaving the returned `h` undropped.
+- Verified with a smoke test that the returned `h` has 0.00% exact zeros in train mode (dropout leaking onto the recurrent path would show ~50%).
+
+### Parameter analysis and scaling
+
+- Broke down the old `e64 / h512` model and found the capacity was badly allocated:
+  - `hidden_to_output`: 5,130,513 params (73.8%)
+  - four gates: 1,181,696 params (17.0%)
+  - embeddings: 640,064 params (9.2%)
+- Benchmarked training speed on MPS and found compute is not the constraint:
+  - `e64 / h512`: ~1.1 min/epoch
+  - `e1024 / h1024`: ~3.6 min/epoch
+  - `e1500 / h1500`: ~4.5 min/epoch
+- Measured that fusing the four gate matmuls into one gives no speedup at these dimensions, because the 10,001-way output projection dominates each step.
+- Measured that moving the output projection and cross entropy *outside* the timestep loop (stack `h` to `[B, T, H]`, one matmul, one CE call) saves 30–35%. Not yet implemented.
+- Concluded the real constraint is data: 887,521 training tokens against 28.9M parameters is ~33 parameters per token, which only works because of dropout.
+- Learned about weight tying but deliberately deferred it to keep this run's changes smaller:
+  - `embeddings.weight` and `hidden_to_output.weight` are both `[10001, 1024]` and encode the same word-identity information in opposite directions
+  - tying them would cut 10,241,024 parameters (28.88M -> 18.64M) at no compute cost
+  - it also doubles the gradient signal per word, which matters because 8,015 of 9,999 vocabulary words appear fewer than 50 times in training
+  - references: Press & Wolf (arXiv:1608.05859), Inan et al. (arXiv:1611.01462)
+
+### New training configuration
+
+- Rebuilt the model as `e1024 / h1024` with `nn.Dropout(0.5)` and learning rate `0.001`, for 40 epochs.
+- Moved the checkpoint path into a single `CHECKPOINT` constant after finding the save path had been renamed to `lstm_model_28M.pth` while all three load paths still pointed at `lstm_model.pth`.
+- Backed up the 158-perplexity checkpoint as `lstm_model_ppl158_e64_h512.pth` before changing dimensions.
+- Smoke tested the new model: 28,884,753 parameters, one full train step, initial loss `9.23` against the expected `ln(10001) = 9.21` for an untrained model.
+- Reference points for what to aim at: Zaremba medium (2x650, dropout 0.5) reaches ~82 perplexity, large (2x1500, dropout 0.65) reaches ~78.
