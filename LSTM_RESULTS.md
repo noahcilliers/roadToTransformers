@@ -340,6 +340,52 @@ Epochs 7 through 11 are a plateau, not a climb: 97.56, 97.77, 98.54, 97.76, 98.2
 
 Overfitting pressure remains high. By epoch 14 the gap reached 1.064 against the untied run's 0.715, because train loss dives to 3.5665.
 
+## Test Accuracy
+
+```text
+Testing results: 21457 correct and 60911 wrong...  26.05 %
+```
+
+Exact next-token accuracy across the runs:
+
+| Model | Test accuracy |
+|---|---:|
+| Bigger RNN, epoch 40 | 172/1024 (16.80%) |
+| LSTM baseline, first run | 16390/82304 (19.91%) |
+| LSTM baseline, continued | 18411/82304 (22.37%) |
+| LSTM tied, ppl 97.57 | **21457/82304 (26.05%)** |
+
+## Generation
+
+From the 97.57 checkpoint at `--temperature 1.0 --top-k 40`:
+
+```text
+context:  the overall collapse in stock prices could permanently erode the base of <unk> support the otc market was struggling to
+generated: offset the stock exchange by the end of n <eos> the dow jones industrial average rose n points to n
+
+context:  about $ n million purchase price and cancellation of a software license provided by the morris units to information international
+generated: wire services <eos> for the n months ended aug. n its quarterly profit rose n n to n million yen
+
+context:  an economist at the national association of manufacturers <eos> but sung won <unk> chief economist at <unk> corp. in minneapolis
+generated: said in recent years the u.s. department also has engaged in <unk> for a number of banks from other companies
+
+context:  put back to the company in n was priced at n basis points above the treasury 's 10-year note <eos>
+generated: the amex stock market 's index of trading was the high n 's index <eos> just for the s&p n
+```
+
+The output now has real syntactic structure: subject-verb agreement, plausible noun phrases, and correctly formed financial idiom. No repetition loops appear at all.
+
+`<unk>` frequency in generated text, measured across 400 generated tokens:
+
+| Model | `<unk>` rate |
+|---|---:|
+| ppl 158, greedy decoding | dominated by `the <unk> of the <unk>` loops |
+| ppl 117.69, temperature 1.1 | ~18% |
+| ppl 97.57, temperature 1.0 | **13.2%** |
+| PTB corpus itself | 5.07% |
+
+Four of twenty sampled sequences contained no `<unk>` at all. The gap to the corpus rate of 5.07% is the model still hedging toward frequent tokens under uncertainty, and should keep closing as perplexity improves.
+
 ## Next Experiments
 
 - **Dropout 0.5 to 0.65.** One line, and the most direct lever on the remaining overfitting. Zaremba's value for the large model.

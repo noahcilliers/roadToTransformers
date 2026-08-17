@@ -343,6 +343,16 @@ Feed-forward neural nets -> RNNs -> LSTM -> seq2seq -> attention -> Transformer
 - Noted the earlier turn (epoch 7 vs 10) is not earlier overfitting: the tied model reached a lower train loss in fewer epochs, so it hit its optimum sooner along the same trajectory.
 - Noted epochs 7-11 were a plateau at the noise level (`97.56, 97.77, 98.54, 97.76, 98.23`), so the "Overfitting detected" message at epoch 8 was premature. Real divergence started at epoch 12.
 
+### Run 4 test and generation
+
+- Tested the tied checkpoint: `21457/82304 (26.05%)` exact next-token accuracy, up from `22.37%` on the baseline.
+- Generated from the same checkpoint at `--temperature 1.0 --top-k 40` and saw the original problem largely resolved:
+  - no repetition loops at all
+  - real syntactic structure and correct financial idiom, e.g. `the dow jones industrial average rose n points to n` and `for the n months ended aug. n its quarterly profit rose n n to n million yen`
+- Measured `<unk>` frequency across 400 generated tokens: `13.2%`, down from ~`18%` at perplexity 117.69, against the corpus rate of `5.07%`.
+- Four of twenty sampled sequences contained no `<unk>` at all.
+- Confirmed the remaining gap to 5.07% is the model hedging toward frequent tokens under uncertainty, not a vocabulary problem.
+
 ### Learning rate: SGD versus Adam
 
 - Asked why Zaremba uses learning rate `1` while this code uses `0.001`, and learned the answer is the optimizer.
