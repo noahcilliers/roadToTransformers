@@ -300,3 +300,70 @@ Feed-forward neural nets -> RNNs -> LSTM -> seq2seq -> attention -> Transformer
 - Backed up the 158-perplexity checkpoint as `lstm_model_ppl158_e64_h512.pth` before changing dimensions.
 - Smoke tested the new model: 28,884,753 parameters, one full train step, initial loss `9.23` against the expected `ln(10001) = 9.21` for an untrained model.
 - Reference points for what to aim at: Zaremba medium (2x650, dropout 0.5) reaches ~82 perplexity, large (2x1500, dropout 0.65) reaches ~78.
+
+## 2026-08-17
+
+### Run 3 results: scaled and regularized, no tying
+
+- Trained `e1024 / h1024`, dropout 0.5, lr 0.001, 28,884,753 parameters.
+- Best validation at epoch 10: loss `4.7681`, perplexity `117.69`, down from the `158.11` baseline.
+- Learned to distinguish overfitting from a learning rate set too high by reading the per-epoch deltas:
+  - train deltas were smooth and monotonic (`-0.0560, -0.0528, -0.0455, -0.0408`) with no oscillation
+  - validation flipped sign at epoch 11 and rose smoothly from there
+  - the train/valid gap widened monotonically from `0.52` to `1.00`
+  - a learning rate that is too high instead produces *bouncing* validation loss and a stalling train loss
+- Concluded the failure mode was overfitting, so lowering the learning rate would only descend more precisely into the same overfit basin.
+- Confirmed dropout was working even so: the gap at the best epoch *narrowed* against the baseline (`0.5186` vs `0.6780`) despite the model being 4.2x larger.
+
+### Weight tying
+
+- Learned that tying is one assignment in `__init__`, not anything in the forward pass:
+  - `self.hidden_to_output.weight = self.embeddings.weight`
+  - both are `[10001, 1024]`; the embedding maps token to vector, the output projection maps vector to token scores
+  - after assignment they are the same object in memory, confirmed with `is`
+- Learned what changes as a result:
+  - `parameters()` deduplicates, so Adam tracks one copy and the trainable count drops by 10,241,024
+  - `state_dict()` does *not* deduplicate, so both keys are still saved and the checkpoint file does not shrink
+  - gradients from both uses accumulate into the one tensor automatically (`emb.weight.grad is out.weight.grad`)
+  - the bias is not tied; `hidden_to_output.bias` stays separate as a per-token frequency prior
+- Found a trap: loading an *untied* checkpoint into a *tied* model silently overwrites the embedding with the output matrix, since both keys copy into the same tensor and the last write wins. No error is raised. Started the tied run fresh with a new checkpoint path.
+- Found and fixed an initialization bug introduced by tying:
+  - `nn.Embedding` inits to `N(0,1)`, `nn.Linear` to `U(-1/sqrt(in), 1/sqrt(in))`
+  - after tying, the embedding's larger weights become the output projection
+  - measured initial loss `24.45` instead of `ln(10001) = 9.21`, with logit std `6.22`
+  - fixed with `nn.init.uniform_(self.embeddings.weight, -0.1, 0.1)`, giving initial loss `9.208`
+  - this is why tied language models always specify their own init; Zaremba uses `U(-0.05, 0.05)`
+
+### Run 4 results: weight tying
+
+- Best validation at epoch 7: loss `4.5805`, perplexity `97.57`, with 18,643,729 parameters.
+- 17% better perplexity than Run 3 while using 36% fewer parameters.
+- Observed that train loss was *lower* despite having 10.2M fewer parameters (`4.6258` vs `4.7597` at epoch 4) — the doubled gradient signal per word makes the model fit faster per epoch, not just generalize better.
+- Observed the gap narrowed at the same time (`0.4184` vs `0.5186`), so the model fits better *and* generalizes better; regularization alone would trade one for the other.
+- Noted the earlier turn (epoch 7 vs 10) is not earlier overfitting: the tied model reached a lower train loss in fewer epochs, so it hit its optimum sooner along the same trajectory.
+- Noted epochs 7-11 were a plateau at the noise level (`97.56, 97.77, 98.54, 97.76, 98.23`), so the "Overfitting detected" message at epoch 8 was premature. Real divergence started at epoch 12.
+
+### Learning rate: SGD versus Adam
+
+- Asked why Zaremba uses learning rate `1` while this code uses `0.001`, and learned the answer is the optimizer.
+- SGD computes `delta = lr * grad`, so the step is proportional to the gradient. Language model gradients are tiny (measured `5.45e-07`), so a large multiplier is needed.
+- Adam computes `delta ~ lr * m/sqrt(v)`, and that ratio is ~O(1) by construction, so the step size is approximately `lr` itself regardless of gradient magnitude.
+- Measured on the same gradient: SGD at `lr=1.0` moved weights by `5.45e-07`, Adam at `lr=0.001` moved them by `9.16e-04` — about 1,680x larger. Adam at `lr=1.0` would move every weight by `0.92` in a single step.
+- Learned the paper's `lr=1` is also entangled with its batch size (20), sequence length (35), and gradient clipping convention ("normalized by minibatch size"), so the number is not portable even to SGD here.
+- Noted that for PTB language models, well-tuned SGD tends to beat Adam at the end — AWD-LSTM's 57 perplexity uses averaged SGD — but that is a lever for after regularization stops being the bottleneck.
+
+### Depth, and what stacking actually means
+
+- Clarified that "hidden to hidden" across *time* already exists in this model: it is the right half of each gate's `[1024, 2048]` weight matrix, since `torch.cat([embeds, h])` into one `Linear` equals `W_ih @ embeds + W_hh @ h`. That is 4,194,304 parameters across the four gates.
+- Clarified that what is missing is depth: this model is `L = 1`, the paper's medium and large models are `L = 2`.
+- Learned that in a stack, layer 2 receives layer 1's *output*, not the same input — it is a composition `f2(f1(x))`, not two parallel passes.
+- Learned that depth only means anything because of the nonlinearities: two stacked linear maps collapse exactly (`(x@W1)@W2 == x@(W1@W2)`), and the gates' sigmoid and tanh are what prevent that collapse. There is no softmax between layers.
+- Computed that `2 x 650` tied would be 13,275,851 parameters and 71% of the current compute — deeper, smaller, *and* faster than `1 x 1024`. Depth is therefore not in tension with the limited training data here.
+- Distinguished stacked layers from encoder-decoder: stacking repeats the same role on the same sequence, while encoder-decoder is two roles on two different sequences separated in time. They are orthogonal — Sutskever's seq2seq uses 4 stacked layers in *both* the encoder and the decoder.
+
+### Seq2seq reading
+
+- Cho et al. (2014-06-03), "Learning Phrase Representations using RNN Encoder-Decoder for Statistical Machine Translation" (arXiv:1406.1078) — introduced the RNN Encoder-Decoder architecture and the GRU.
+- Sutskever, Vinyals & Le (2014-09-10), "Sequence to Sequence Learning with Neural Networks" (arXiv:1409.3215) — the paper usually meant by "seq2seq". End-to-end LSTM translation, 34.8 BLEU on WMT'14 English-French against a phrase-based baseline's 33.3. Reversing the source word order improved results markedly by creating short-term dependencies.
+- Bahdanau, Cho & Bengio (2014-09-01), "Neural Machine Translation by Jointly Learning to Align and Translate" (arXiv:1409.0473) — attention. Names the flaw directly: "the use of a fixed-length vector is a bottleneck".
+- Vaswani et al. (2017), "Attention Is All You Need" (arXiv:1706.03762) — asks whether the recurrence is needed at all once attention exists.
