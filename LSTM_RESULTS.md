@@ -229,16 +229,121 @@ Reference targets: Zaremba medium (2x650, dropout 0.5) reaches ~82 perplexity; l
 
 ## Results
 
-Pending.
+| Epoch | Train Loss | Valid Loss | Perplexity | Note |
+|---:|---:|---:|---:|---|
+| 1 | 5.8145 | 5.2632 | 193.09 | |
+| 2 | 5.1815 | 5.0223 | 151.76 | |
+| 3 | 4.9269 | 4.9107 | 135.74 | |
+| 4 | 4.7597 | 4.8581 | 128.78 | |
+| 5 | 4.6305 | 4.8186 | 123.79 | |
+| 6 | 4.5290 | 4.7968 | 121.13 | |
+| 7 | 4.4430 | 4.7822 | 119.36 | |
+| 8 | 4.3697 | 4.7742 | 118.41 | |
+| 9 | 4.3055 | 4.7710 | 118.03 | |
+| 10 | 4.2495 | 4.7681 | 117.69 | **best validation** |
+| 11 | 4.1967 | 4.7728 | 118.25 | overfitting warning |
+| 12 | 4.1512 | 4.7759 | 118.61 | overfitting warning |
+| ... | | | | |
+| 22 | 3.8454 | 4.8406 | 126.55 | run stopped |
 
-## Planned Next Run
+**Best: epoch 10, validation 4.7681, perplexity 117.69.** Down from the 158.11 baseline, a 26% reduction.
 
-Weight tying, as the first single-variable change against this configuration:
+Checkpoint preserved as `lstm_model_ppl11769_e1024_h1024_drop05.pth`.
+
+### Interpretation
+
+Dropout worked. Despite the model being 4.2x larger, the train/validation gap at the best epoch *narrowed* against the baseline: 0.5186 here versus 0.6780 before. Without regularization, quadrupling capacity on 887k tokens would have widened it considerably.
+
+It is still not enough dropout. From epoch 11 onward, train loss fell 0.40 while validation rose 0.07, and the gap widened monotonically from 0.52 to 1.00 by epoch 22.
+
+The failure mode is overfitting, not optimization. The per-epoch deltas were smooth and monotonic throughout — `-0.0560, -0.0528, -0.0455, -0.0408` on the train side with no oscillation. A learning rate set too high produces noisy, bouncing validation loss and a stalling train loss; none of that appears here. Lowering the learning rate would only descend more precisely into the same overfit basin.
+
+Running 40 epochs was wasteful for this configuration, since the optimum arrived at epoch 10.
+
+---
+
+# Run 4: Weight Tying
+
+Recorded: 2026-08-17
+
+Single-variable change against Run 3:
 
 ```python
 self.hidden_to_output.weight = self.embeddings.weight
 ```
 
-Both matrices are `[10001, 1024]` and encode word identity in opposite directions. Tying cuts 10,241,024 parameters (28.88M to 18.64M) at no compute cost, and doubles the gradient signal per word — which matters because 8,015 of 9,999 vocabulary words appear fewer than 50 times in training, and each currently has a 1,024-parameter output row estimated from those few examples.
+Both matrices are `[10001, 1024]` and encode word identity in opposite directions — the embedding maps token to vector, the output projection maps vector to token scores. Sharing them cuts 10,241,024 parameters (28.88M to 18.64M) at no compute cost, and doubles the gradient signal per word, which matters because 8,015 of 9,999 vocabulary words appear fewer than 50 times in training.
 
 References: Press & Wolf (arXiv:1608.05859), Inan et al. (arXiv:1611.01462).
+
+## Initialization caveat
+
+Tying silently breaks the output layer's initialization. `nn.Embedding` initializes to `N(0, 1)` while `nn.Linear` uses `U(-1/sqrt(in), 1/sqrt(in))`, so after the assignment the embedding's much larger weights become the output projection. Measured initial loss was **24.45 instead of `ln(10001) = 9.21`**, with logit std 6.22 and absmax 29.5 — the model starts wildly overconfident about random predictions.
+
+Fixed with an explicit small init on the shared matrix:
+
+```python
+nn.init.uniform_(self.embeddings.weight, -0.1, 0.1)
+nn.init.zeros_(self.hidden_to_output.bias)
+```
+
+Initial loss after the fix: 9.208. This is why every tied language model specifies its own initialization rather than relying on module defaults. Zaremba uses `U(-0.05, 0.05)`, which lands in the same place.
+
+## Results
+
+| Epoch | Train Loss | Valid Loss | Perplexity | Note |
+|---:|---:|---:|---:|---|
+| 1 | 5.9262 | 5.3106 | 202.48 | |
+| 2 | 5.1862 | 4.9768 | 145.02 | |
+| 3 | 4.8549 | 4.8040 | 121.99 | |
+| 4 | 4.6258 | 4.6951 | 109.42 | already beats Run 3's best |
+| 5 | 4.4431 | 4.6361 | 103.14 | |
+| 6 | 4.2941 | 4.6009 | 99.57 | under 100 |
+| 7 | 4.1621 | 4.5805 | 97.57 | **best validation** |
+| 8 | 4.0502 | 4.5826 | 97.77 | plateau |
+| 9 | 3.9465 | 4.5905 | 98.54 | plateau |
+| 10 | 3.8561 | 4.5825 | 97.76 | plateau |
+| 11 | 3.7719 | 4.5873 | 98.23 | plateau |
+| 12 | 3.6957 | 4.5999 | 99.47 | genuine divergence begins |
+| 13 | 3.6286 | 4.6091 | 100.39 | |
+| 14 | 3.5665 | 4.6304 | 102.56 | run interrupted |
+
+**Best: epoch 7, validation 4.5805, perplexity 97.57.**
+
+Checkpoint preserved as `lstm_model_ppl9757_tied_e1024.pth`.
+
+## Head-to-head
+
+| | Run 3 untied | Run 4 tied |
+|---|---:|---:|
+| Parameters | 28,884,753 | 18,643,729 |
+| Best perplexity | 117.69 | **97.57** |
+| Best epoch | 10 | 7 |
+| Train loss at best | 4.2495 | 4.1621 |
+| Gap at best | 0.5186 | 0.4184 |
+
+## Interpretation
+
+Tying improved perplexity by 17% while removing 36% of the parameters.
+
+Three observations:
+
+**Epoch 1 was worse** (202.48 vs 193.09). The shared matrix serves both roles from a fresh small init, so it starts slower. It crossed over at epoch 2 and the lead widened every epoch after: -6.75, -13.74, -19.37.
+
+**Train loss is lower despite 10.2M fewer parameters** — 4.6258 vs 4.7597 at epoch 4. This is the doubled gradient signal: every word trains its vector from both the input and the output side, so the model fits faster per epoch. Fewer parameters would normally mean slower fitting.
+
+**The gap narrowed at the same time** (0.4184 vs 0.5186). Fitting better *and* generalizing better simultaneously is the signature of a better-specified model rather than a differently-regularized one — regularization alone buys a smaller gap at the cost of a higher train loss.
+
+The earlier turn (epoch 7 vs 10) is not earlier overfitting. The tied model reached train loss 4.1621 in seven epochs where the untied model needed ten to reach 4.2495; it traverses the trajectory faster and hits its optimum sooner.
+
+Epochs 7 through 11 are a plateau, not a climb: 97.56, 97.77, 98.54, 97.76, 98.23. Those swings are at the noise level. The "Overfitting detected" message at epoch 8 was premature — four further epochs produced essentially equivalent models. Genuine divergence starts at epoch 12.
+
+Overfitting pressure remains high. By epoch 14 the gap reached 1.064 against the untied run's 0.715, because train loss dives to 3.5665.
+
+## Next Experiments
+
+- **Dropout 0.5 to 0.65.** One line, and the most direct lever on the remaining overfitting. Zaremba's value for the large model.
+- **Depth: 2 layers at 650 units, tied.** 13,275,851 parameters and 71% of the current compute — deeper, smaller, and faster at once. This is the shape of Zaremba's medium model, which reaches ~82 perplexity. Requires making the cell a reusable submodule and threading two `(h, c)` pairs through the training loop.
+- **Batched output projection.** Stack the hidden states to `[B, T, H]` and do one matmul plus one cross entropy call outside the timestep loop. Measured at 30-35% faster, no effect on results.
+- **`ReduceLROnPlateau`.** Worth single-digit perplexity, not tens. Lower priority than regularization.
+- Consider stopping runs at 20 epochs; both runs found their optimum well before 40.

@@ -57,6 +57,15 @@ class LSTM(nn.Module):
 
         ###Get Logits
         self.hidden_to_output = nn.Linear(hidden_dim, vocab_size)
+        assert embedding_dim == hidden_dim, "weight tying needs embedding_dim == hidden_dim"
+        self.hidden_to_output.weight = self.embeddings.weight
+
+        # nn.Embedding inits to N(0,1), nn.Linear to U(-1/sqrt(in), 1/sqrt(in)).
+        # after tying, the embedding's much larger weights become the output
+        # projection, which starts the model wildly overconfident (loss ~24
+        # instead of ln(vocab) = 9.21). tied models need an explicit small init.
+        nn.init.uniform_(self.embeddings.weight, -0.1, 0.1)
+        nn.init.zeros_(self.hidden_to_output.bias)
 
         # applied to the non-recurrent connections only: embedding -> cell,
         # and cell -> logits. never to the h we hand to the next timestep.
@@ -122,7 +131,7 @@ def batchify(dataset, batch_size, device):
 loss_fn = nn.CrossEntropyLoss()
 
 # one place, so train/test/generate can never drift onto different checkpoints
-CHECKPOINT = "lstm_model_28M.pth"
+CHECKPOINT = "lstm_model_18.6M_tied.pth"
 
 def __valid__(model, device, valid_dataset, seq_len, batch_size):
     data= batchify(valid_dataset, batch_size, device)
@@ -163,13 +172,18 @@ def __valid__(model, device, valid_dataset, seq_len, batch_size):
 
 
 
-def __train__(model, device, train_dataset, valid_dataset, optimizer, epochs, seq_len, batch_size):
+def __train__(model, device, train_dataset, valid_dataset, optimizer, epochs, seq_len, batch_size, cont):
     data= batchify(train_dataset, batch_size, device)
     stream_len = data.size(1)
 
-    model.train()
+    
     best_valid = float("inf")
+    if cont:
+        best_valid, ppl = __valid__(model, device, valid_dataset, seq_len, batch_size)
+        print(f"resuming: valid {best_valid:.4f}, ppl {ppl:.2f}")
+    
 
+    model.train()
     for e in range(epochs):
         epoch_loss = 0.0
         token_count = 0
@@ -218,7 +232,7 @@ def train(vocab_size, embedding_dim, hidden_dim, cont, epoch, seq_len, batch_siz
         model.load_state_dict(torch.load(CHECKPOINT, map_location=device))
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
     
-    __train__(model, device, train_data, valid_data, optimizer, epoch, seq_len, batch_size)
+    __train__(model, device, train_data, valid_data, optimizer, epoch, seq_len, batch_size, cont)
 
 ############################################################
 ### Testing functions below                             ###
